@@ -11,15 +11,14 @@
 #include "board-peripherals.h"
 #include <stdint.h>
 
-#define NUM_SEND 2
-#define MAX_READINGS 256
+#define NUM_SEND 1
+#define MAX_READINGS 60
 
 typedef struct {
     unsigned long src_id;
     unsigned long timestamp;
     unsigned long seq;
-    uint16_t captured_light_readings[MAX_READINGS];
-    uint16_t received_light_readings[MAX_READINGS];
+    uint16_t light_readings[MAX_READINGS];
     uint8_t num_readings;
 } data_packet_struct;
 
@@ -29,6 +28,7 @@ static data_packet_struct data_packet;
 static void init_opt_reading(void);
 static void capture_light_reading(void);
 unsigned long curr_timestamp;
+int curr_light_reading_index = 0;
 linkaddr_t dest_addr;
 
 #define RSSI_THRESHOLD -70
@@ -39,23 +39,18 @@ linkaddr_t dest_addr;
 // For neighbour discovery, we would like to send message to everyone. We use Broadcast address:
 linkaddr_t dest_addr;
 
-static void
-capture_light_reading()
-{
-  int value;
-
-  value = opt_3001_sensor.value(0);
-  if(value != CC26XX_SENSOR_READING_ERROR) {
-    for(int i = 0; i < MAX_READINGS; i++) {
-        if (data_packet.captured_light_readings[i] == 0) {
-            data_packet.captured_light_readings[i] = value;
-            break;
+// Capture light readings at 1HZ for 60 seconds (60 readings in total)
+static void capture_light_reading() {
+    for (int i = 0; i < MAX_READINGS; i++) {
+        int value = opt_3001_sensor.value(0);
+        if (value != CC26XX_SENSOR_READING_ERROR) {
+            data_packet.light_readings[i] = value;
+        } else {
+            printf("OPT: Light Sensor's Warming Up\n\n");
         }
+        delay(1000);
     }
-  } else {
-    printf("OPT: Light Sensor's Warming Up\n\n");
-  }
-  init_opt_reading();
+    printf("Finished capturing light readings.\n");
 }
 
 static void
@@ -68,11 +63,23 @@ int is_good_link_quality(int rssi) {
     return rssi >= RSSI_THRESHOLD;
 }
 
-void print_received_light_readings() {
-    for(int i = 0; i < data_packet.num_readings; i++) {
-        printf("OPT: Light=%d.%02d lux\n", data_packet.received_light_readings[i] / 100,
-        data_packet.received_light_readings[i] % 100);
+void print_received_light_reading() {
+    if (curr_light_reading_index > MAX_READINGS) {
+        printf("Already printed out all light readings");
+    } else {
+        printf("OPT: Light=%d.%02d lux\n", data_packet.light_readings[curr_light_reading_index] / 100,
+    data_packet.light_readings[curr_light_reading_index] % 100);
+    curr_light_reading_index += 1;
     }
+}
+
+bool received_light_readings_uninitialized() {
+    for (int i = 0; i < MAX_READINGS; i++) {
+        if (data_packet.light_readings[i] != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *src, const linkaddr_t *dest) {
@@ -80,12 +87,13 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
         static data_packet_struct received_packet_data;
         memcpy(&received_packet_data, data, len);
         printf("Received neighbour discovery packet %lu with rssi %d from %ld\n", received_packet_data.seq, (signed short)packetbuf_attr(PACKETBUF_ATTR_RSSI), received_packet_data.src_id);
-        // Check if link quality is good
-        if(is_good_link_quality(packetbuf_attr(PACKETBUF_ATTR_RSSI))) {
-            // Copy light readings for transfer
-            memcpy(&data_packet.received_light_readings, &received_packet_data.captured_light_readings, sizeof(received_packet_data.captured_light_readings));
-            data_packet.num_readings = received_packet_data.num_readings;
-            print_received_light_readings();
+        // Check if link quality is good and have not been populated with the light readings, then populate and print
+        if(is_good_link_quality(packetbuf_attr(PACKETBUF_ATTR_RSSI)) && received_light_readings_uninitialized()) {
+            memcpy(&data_packet.light_readings, &received_packet_data.light_readings, sizeof(uint16_t));
+            print_received_light_reading();
+            // Check if link quality is good and have already been populated with the light readings, then just print
+        } else if (is_good_link_quality(packetbuf_attr(PACKETBUF_ATTR_RSSI))) {
+            print_received_light_reading();
         }
     }
 }
@@ -96,15 +104,19 @@ char sender_scheduler(struct rtimer *t, void *ptr) {
     PT_BEGIN(&pt);
     curr_timestamp = clock_time();
     printf("Start clock %lu ticks, timestamp %3lu.%03lu\n", curr_timestamp, curr_timestamp / CLOCK_SECOND, ((curr_timestamp % CLOCK_SECOND) * 1000) / CLOCK_SECOND);
+
+    capture_light_reading();
+    
     while(1) {
         NETSTACK_RADIO.on();
-        capture_light_reading();
         for(i = 0; i < NUM_SEND; i++) {
             nullnet_buf = (uint8_t *)&data_packet;
             nullnet_len = sizeof(data_packet);
+            
             data_packet.seq++;
             curr_timestamp = clock_time();
             data_packet.timestamp = curr_timestamp;
+
             printf("Send seq# %lu  @ %8lu ticks   %3lu.%03lu\n", data_packet.seq, curr_timestamp, curr_timestamp / CLOCK_SECOND, ((curr_timestamp % CLOCK_SECOND) * 1000) / CLOCK_SECOND);
             NETSTACK_NETWORK.output(&dest_addr);
             if(i != (NUM_SEND - 1)) {
