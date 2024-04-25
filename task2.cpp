@@ -20,7 +20,6 @@ typedef struct {
     unsigned long timestamp;
     unsigned long seq;
     uint16_t light_reading;
-    uint8_t num_readings;
     bool has_read;
 } data_packet_struct;
 
@@ -114,8 +113,9 @@ char sender_scheduler(struct rtimer *t, void *ptr) {
             data_packet.seq++;
             curr_timestamp = clock_time();
             data_packet.timestamp = curr_timestamp;
+            data_packet.light_reading = captured_light_readings[curr_light_reading_index - 1];
 
-            printf("Send seq# %lu  @ %8lu ticks   %3lu.%03lu\n", data_packet.seq, curr_timestamp, curr_timestamp / CLOCK_SECOND, ((curr_timestamp % CLOCK_SECOND) * 1000) / CLOCK_SECOND);
+            printf("Send seq# %lu  @ %8lu ticks   %3lu.%03lu with light reading %d \n", data_packet.seq, curr_timestamp, curr_timestamp / CLOCK_SECOND, ((curr_timestamp % CLOCK_SECOND) * 1000) / CLOCK_SECOND, data_packet.light_reading);
             NETSTACK_NETWORK.output(&dest_addr);
             if(i != (NUM_SEND - 1)) {
                 rtimer_set(t, RTIMER_TIME(t) + WAKE_TIME, 1, (rtimer_callback_t)sender_scheduler, ptr);
